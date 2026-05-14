@@ -10,6 +10,82 @@ increment the patch version.
 
 ## [Unreleased]
 
+### Added
+
+- **`PreEncoded<M>` response body** — wraps already-encoded protobuf
+  bytes and satisfies `Encodable<M>`. Use when the handler builds and
+  encodes a borrowing view internally — e.g. a `*View<'a>` borrowing
+  from a local snapshot held in `Arc` — rather than returning the view
+  itself. The `'static` bound on handler bodies and stream items means a
+  view with a non-`'static` lifetime can't cross the handler boundary;
+  `PreEncoded` carries the bytes across instead.
+
+  The `M` type parameter is a compile-time witness. Three construction
+  paths, in decreasing order of guarantee:
+  `PreEncoded::from_message(&m)` (also `From<&M>`/`.into()`) encodes an
+  owned `M` and the receiver type is the witness;
+  `PreEncoded::from_view(&view)` enforces `M = MView::Owned`;
+  `PreEncoded::from_bytes_unchecked(bytes)` wraps already-encoded bytes
+  from elsewhere — a cache, a blob store, a sidecar — and takes `M` on
+  trust (in debug builds it also decodes once as a `debug_assert!`).
+
+  Optimized for the proto codec, where the bytes pass through verbatim.
+  JSON requests fall back to decoding the proto bytes as `M` and
+  re-serializing — slow, but a working response rather than a runtime
+  `unimplemented` error. Services with significant JSON traffic should
+  build and return the owned message (or `MaybeBorrowed::Owned`) so the
+  codec layer can skip the proto round-trip.
+
+### Breaking
+
+These are breaking under semver but the practical blast radius is
+narrow. The common consumer surfaces — `impl <GeneratedServiceTrait>`
+blocks and `*_handler_fn` registrations — compile unchanged. Only
+hand-rolled `impl StreamingHandler`/`impl BidiStreamingHandler` blocks
+and direct callers of `dispatcher::codegen::encode_response_stream`
+need a one-line edit.
+
+- **Streaming handler traits gain `type Item: Encodable<Res>`** and
+  return `ServiceStream<Self::Item>` instead of `ServiceStream<Res>` —
+  brings `StreamingHandler`, `BidiStreamingHandler`,
+  `ViewStreamingHandler`, and `ViewBidiStreamingHandler` to parity with
+  unary `Handler::Body` (added in 0.4.0). Stream items can now be
+  `PreEncoded`, `MaybeBorrowed`, or any `Encodable<Res>`; previously
+  they had to be the owned `Res` itself.
+
+  These are the lower-level escape-hatch traits behind `Router`, not
+  the primary handler surface. Most consumers use the codegen-generated
+  service trait or the `*_handler_fn` closure helpers, neither of which
+  is affected — codegen handles the new shape and the helpers infer
+  `type Item` from the closure return. Hand-rolled `impl
+  StreamingHandler` blocks must add `type Item = Res;`. We surveyed the
+  in-tree consumers and found two; if you have hand-rolled impls,
+  expect a single one-line addition per impl block.
+
+- **Generated server-streaming and bidi-streaming trait methods now
+  declare `ServiceStream<impl Encodable<Out> + Send + use<Self>>`**
+  instead of `ServiceStream<Out>`. **Existing `impl <Service>` blocks
+  that return `ServiceStream<Out>` compile unchanged via RPITIT
+  refinement** (the same mechanism the unary path used since 0.4.0; the
+  `refining_impl_trait` lint suppression documented in 0.4.1 covers the
+  streaming case too). Handlers that want to yield `PreEncoded` items
+  must do so from `'static` data — the `use<Self>` precise-capturing
+  clause excludes `&self`'s lifetime, so views built inside the stream
+  body must encode to bytes before the borrow ends.
+
+  **Consumers with checked-in `protoc-gen-connect-rust` output must
+  regenerate** (the same regeneration footgun documented in 0.4.0).
+  `connectrpc-build` users (build.rs) are unaffected.
+
+- **`dispatcher::codegen::encode_response_stream` gains a `B` type
+  parameter** for the stream item type. The generated dispatcher and
+  route-registration code passes `Res` explicitly because the trait
+  method's stream item is the *opaque* `impl Encodable<Out>` (RPITIT),
+  which can't be unified against the `Encodable<Res>` impls. Only
+  consumers that call `dispatcher::codegen::encode_response_stream`
+  directly need to turbofish `encode_response_stream::<Res, _, _>(s,
+  format)`. We are not aware of any.
+
 ## [0.4.2] - 2026-05-07
 
 ### Added

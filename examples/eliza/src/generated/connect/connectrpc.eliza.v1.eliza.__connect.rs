@@ -108,10 +108,22 @@ pub const ELIZA_SERVICE_SERVICE_NAME: &str = "connectrpc.eliza.v1.ElizaService";
 /// for zero-copy access patterns and when `to_owned_message()` is needed.
 ///
 /// The `impl Encodable<Out>` return bound accepts the owned `Out`, the
-/// generated `OutView<'_>` / `OwnedOutView`, or
-/// [`MaybeBorrowed`](::connectrpc::MaybeBorrowed). View bodies are not
-/// emitted for output types mapped via `extern_path` (the impl would be
-/// an orphan); return owned for WKT/extern outputs.
+/// generated `OutView<'_>` / `OwnedOutView`,
+/// [`MaybeBorrowed`](::connectrpc::MaybeBorrowed), or
+/// [`PreEncoded`](::connectrpc::PreEncoded) for handlers that encode a
+/// non-`'static` view internally and pass the bytes across the handler
+/// boundary. View bodies are not emitted for output types mapped via
+/// `extern_path` (the impl would be an orphan); return owned for
+/// WKT/extern outputs.
+///
+/// Server-streaming and bidi-streaming methods return
+/// `ServiceStream<impl Encodable<Out> + Send + use<Self>>`. The
+/// `use<Self>` precise-capturing clause excludes `&self`'s lifetime
+/// (unary methods use `use<'a, Self>` and may borrow), so stream items
+/// must be `'static`. To stream view-encoded data, encode each item
+/// inside the stream body and yield
+/// [`PreEncoded`](::connectrpc::PreEncoded) — see its `# Streaming
+/// example` doc.
 #[allow(clippy::type_complexity)]
 pub trait ElizaService: Send + Sync + 'static {
     /// Say is a unary RPC. Eliza responds to the prompt with a single sentence.
@@ -138,7 +150,9 @@ pub trait ElizaService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
             ::connectrpc::ServiceStream<
-                crate::proto::connectrpc::eliza::v1::ConverseResponse,
+                impl ::connectrpc::Encodable<
+                    crate::proto::connectrpc::eliza::v1::ConverseResponse,
+                > + Send + use<Self>,
             >,
         >,
     > + Send;
@@ -151,7 +165,9 @@ pub trait ElizaService: Send + Sync + 'static {
     ) -> impl ::std::future::Future<
         Output = ::connectrpc::ServiceResult<
             ::connectrpc::ServiceStream<
-                crate::proto::connectrpc::eliza::v1::IntroduceResponse,
+                impl ::connectrpc::Encodable<
+                    crate::proto::connectrpc::eliza::v1::IntroduceResponse,
+                > + Send + use<Self>,
             >,
         >,
     > + Send;
@@ -201,7 +217,11 @@ impl<S: ElizaService> ElizaServiceExt for S {
                     })
                 },
             )
-            .route_view_bidi_stream(
+            .route_view_bidi_stream::<
+                _,
+                _,
+                crate::proto::connectrpc::eliza::v1::ConverseResponse,
+            >(
                 ELIZA_SERVICE_SERVICE_NAME,
                 "Converse",
                 ::connectrpc::view_bidi_streaming_handler_fn({
@@ -212,7 +232,11 @@ impl<S: ElizaService> ElizaServiceExt for S {
                     }
                 }),
             )
-            .route_view_server_stream(
+            .route_view_server_stream::<
+                _,
+                _,
+                crate::proto::connectrpc::eliza::v1::IntroduceResponse,
+            >(
                 ELIZA_SERVICE_SERVICE_NAME,
                 "Introduce",
                 ::connectrpc::view_streaming_handler_fn({
@@ -333,10 +357,11 @@ impl<T: ElizaService> ::connectrpc::Dispatcher for ElizaServiceServer<T> {
                     let resp = svc.introduce(ctx, req).await?;
                     Ok(
                         resp
-                            .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream(
-                                s,
-                                format,
-                            )),
+                            .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
+                                crate::proto::connectrpc::eliza::v1::IntroduceResponse,
+                                _,
+                                _,
+                            >(s, format)),
                     )
                 })
             }
@@ -379,10 +404,11 @@ impl<T: ElizaService> ::connectrpc::Dispatcher for ElizaServiceServer<T> {
                     let resp = svc.converse(ctx, req_stream).await?;
                     Ok(
                         resp
-                            .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream(
-                                s,
-                                format,
-                            )),
+                            .map_body(|s| ::connectrpc::dispatcher::codegen::encode_response_stream::<
+                                crate::proto::connectrpc::eliza::v1::ConverseResponse,
+                                _,
+                                _,
+                            >(s, format)),
                     )
                 })
             }
