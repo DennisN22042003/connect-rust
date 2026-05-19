@@ -1193,6 +1193,75 @@ mod tests {
         }
     }
 
+    /// End-to-end: a registered interceptor wraps the unary call. The
+    /// interceptor sees `path()`, `Spec`, the request payload, and can
+    /// rewrite the response before it hits the wire. Also pins the
+    /// invariant that `path()` and `spec().procedure` agree when both are
+    /// present (codegen dispatch is the only path where both are).
+    #[tokio::test]
+    async fn interceptor_wraps_unary_call() {
+        use connectrpc::{Interceptor, Next, UnaryRequest, UnaryResponse};
+
+        /// Reads `path()` and `Spec`, echoes the path and request `data`
+        /// field through response headers, and increments the response
+        /// message's `sequence` field.
+        struct SpecAndBodyInterceptor;
+
+        #[connectrpc::async_trait]
+        impl Interceptor for SpecAndBodyInterceptor {
+            async fn intercept_unary(
+                &self,
+                req: UnaryRequest,
+                next: Next<'_>,
+            ) -> Result<UnaryResponse, ConnectError> {
+                // `path()` is the wire truth; `spec().procedure` is the
+                // resolved registration. The codegen dispatcher supplies
+                // both and they must agree — pin that invariant here, since
+                // this is the only test where both are present.
+                let path = req
+                    .ctx
+                    .path()
+                    .expect("dispatch sets path before interceptors run")
+                    .to_owned();
+                assert_eq!(
+                    req.ctx.spec().map(|s| s.procedure),
+                    Some(path.as_str()),
+                    "Spec::procedure and RequestContext::path() must agree"
+                );
+                let body = req.payload.message::<EchoRequest>()?.data.clone();
+                let mut resp = next.run(req).await?;
+                let mut msg = resp.body.message::<EchoResponse>()?.clone();
+                msg.sequence += 1000;
+                resp.body.set_message(msg);
+                Ok(resp
+                    .with_header("x-path", path)
+                    .with_header("x-req-data", body))
+            }
+        }
+
+        let server = EchoServiceServer::new(TestEchoService);
+        let service = ConnectRpcService::new(server).with_interceptor(SpecAndBodyInterceptor);
+        let app = axum::Router::new().fallback_service(service);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _h = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let resp = make_client(addr)
+            .echo(EchoRequest {
+                sequence: 7,
+                data: "ping".into(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.headers().get("x-path").unwrap(),
+            "/test.echo.v1.EchoService/Echo"
+        );
+        assert_eq!(resp.headers().get("x-req-data").unwrap(), "ping");
+        // The handler echoes `sequence`; the interceptor adds 1000.
+        assert_eq!(resp.into_view().sequence, 1007);
+    }
+
     /// End-to-end: the codegen dispatcher surfaces `Spec` and `Protocol` on
     /// `RequestContext`, and the dynamic `Router` does not (no `'static` path).
     #[tokio::test]
