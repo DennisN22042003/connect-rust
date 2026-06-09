@@ -19,6 +19,14 @@ increment the patch version.
   from [#133]), and a gRPC-Web response now completes as soon as a
   complete trailers frame is buffered instead of reading the body to EOF,
   so well-formed responses finish even if the server keeps writing.
+- **Connect streaming clients report an error when a response body ends
+  without the required END_STREAM envelope** ([#140]). `message()` now
+  returns `Err` with code `unavailable` (matching connect-go) instead of
+  a clean `Ok(None)`, so a stream cut off mid-response is no longer
+  indistinguishable from a complete one. Streams that previously appeared
+  to drain cleanly against a known-good server may now error — if you see
+  this, suspect an intermediary (proxy or load balancer) stripping the
+  trailing envelope.
 
 ### Changed
 
@@ -42,6 +50,7 @@ increment the patch version.
   fail the RPC on truncated uploads — the right default for aggregation;
   handlers that want to tolerate truncation must match on the error.
 
+[#140]: https://github.com/anthropics/connect-rust/issues/140
 [#147]: https://github.com/anthropics/connect-rust/pull/147
 [#150]: https://github.com/anthropics/connect-rust/pull/150
 
